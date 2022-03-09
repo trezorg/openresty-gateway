@@ -1,0 +1,39 @@
+version: '3'
+services:
+  app:
+    command: /bin/bash -c "bash ${APP_ROOT}/scripts/subst_nginx.sh; exec /usr/bin/openresty -g 'daemon off;'"
+    build: .
+    image: ${SERVICE_IMAGE}
+    environment:
+      - JWT_LEEWAY=10
+      - JWT_SECRET_KEY
+    ports:
+      - ${APP_PORT}:${PORT}
+      - ${METRICS_PORT}:${METRICS_PORT}
+    volumes:
+      - ./develop/jwt_keys:${APP_ROOT}/jwt_keys
+    depends_on:
+      - redis
+    env_file: docker-compose-env/nginx.env
+
+  redis:
+    image: vinayakhulawale/ssl-redis-server
+    hostname: redis
+    restart: "always"
+    volumes:
+      - redis:${REDIS_DATA}
+    ports:
+      - ${REDIS_LISTEN_PORT}:${REDIS_LISTEN_PORT}
+    env_file: docker-compose-env/redis.env
+
+  fake_profile:
+    build: develop/nodejs-faker/
+    ports:
+      - 80
+
+networks:
+  default:
+    driver: bridge
+
+volumes:
+  redis:

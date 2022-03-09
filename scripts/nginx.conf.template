@@ -1,0 +1,133 @@
+# -*- mode: nginx -*-
+
+events {
+    worker_connections 1024;
+}
+
+env JWT_SECRET_KEY;
+env JWT_LEEWAY;
+env REDIS_HOST;
+env REDIS_PORT;
+env REDIS_DB;
+env REDIS_SSL;
+env REDIS_POOL_SIZE;
+env REDIS_URI;
+env REDIS_PASSWORD;
+
+http {
+
+    upstream backend_profile {
+        server ${BOFP_PROFILE_BACKEND} max_fails=0;
+        keepalive  4;
+    }
+
+    tcp_nopush     on;
+    tcp_nodelay    on;
+    server_names_hash_bucket_size  128;
+
+    include nginx.configure-connection-map.conf;
+    include nginx.configure-logs-format.conf;
+
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_128_CCM_8_SHA256:TLS_AES_128_CCM_SHA256:ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers on;
+    lua_ssl_protocols   TLSv1.2 TLSv1.3;
+    lua_ssl_ciphers     TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_128_CCM_8_SHA256:TLS_AES_128_CCM_SHA256:ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-SHA384;
+
+    include nginx.configure-metrics.conf;
+
+    init_by_lua '
+        local function getEnv(key, defaultValue)
+            local value = os.getenv(key)
+            if value == nil then
+                value = defaultValue
+            end
+            return value
+        end
+        local validators = require "resty.jwt-validators"
+        local system_leeway = tonumber(getEnv("JWT_LEEWAY", "0"))
+        -- set the leeway which will be used in all validators.is_not_expired() checks
+        validators.set_system_leeway(system_leeway)
+    ';
+
+    server {
+        listen 9145;
+        location /metrics {
+            allow 192.168.0.0/16;
+            allow 10.0.0.0/8;
+            allow 100.64.0.0/10;
+            allow 172.16.0.0/12;
+            deny all;
+            content_by_lua_block {
+                metric_connections:set(ngx.var.connections_reading, {"reading"})
+                metric_connections:set(ngx.var.connections_waiting, {"waiting"})
+                metric_connections:set(ngx.var.connections_writing, {"writing"})
+                prometheus:collect()
+            }
+        }
+    }
+
+    server {
+        resolver local=on;
+        listen ${PORT} default_server;
+        server_name ${HOST};
+        underscores_in_headers on;
+        gzip  on;
+        gzip_buffers 16 8k;
+        gzip_comp_level 1;
+        gzip_http_version 1.1;
+        gzip_min_length 256;
+        gzip_proxied any;
+        gzip_vary on;
+        gzip_types
+            text/xml application/xml application/atom+xml application/rss+xml application/xhtml+xml image/svg+xml
+            text/javascript application/javascript application/x-javascript
+            text/x-json application/json application/x-web-app-manifest+json
+            text/css text/plain text/x-component
+            font/opentype application/x-font-ttf application/vnd.ms-fontobject
+            image/x-icon;
+        gzip_disable  "msie6";
+
+        client_max_body_size 50M;
+        client_body_timeout 30;
+
+        location /profile/ {
+            access_by_lua '
+                local blacklist = require "echo-redis-blacklist"
+                blacklist.check_blacklist()
+            ';
+
+            proxy_pass http://backend_profile/;
+            include nginx.configure-proxy.conf;
+        }
+
+        location /something-without-blacklist/ {
+            access_by_lua '
+                local guard = require "echo-guard"
+                guard.protect()
+            ';
+
+            proxy_pass http://backend_profile/;
+            include nginx.configure-proxy.conf;
+        }
+
+        location /websockets/ {
+            proxy_pass http://backend_profile/;
+            include nginx.configure-proxy-websockets.conf;
+        }
+
+        location = /robots.txt {
+            access_log off;
+            return 200 'User-agent: *\nDisallow: /';
+        }
+
+        location / {
+            access_log off;
+            return 200;
+        }
+
+        access_log /dev/stdout bitnet;
+        error_log stderr info;
+
+    }
+}
